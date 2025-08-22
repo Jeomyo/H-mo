@@ -20,19 +20,22 @@ SHOW_WINDOW = True                         # OpenCV 창 표시 여부
 WINDOW_NAME = "Path Planning (overlay)"
 #----------------------------------------------
 
-
 class PathPlannerNode(Node):
     def __init__(self):
         super().__init__('path_planner_node')
 
-        # 파라미터 선언
+        # 기존 파라미터들
         self.sub_lane_topic = self.declare_parameter('sub_lane_topic', SUB_LANE_TOPIC_NAME).value
         self.sub_bev_topic  = self.declare_parameter('sub_bev_topic', SUB_BEV_IMAGE_TOPIC).value
         self.pub_topic = self.declare_parameter('pub_topic', PUB_TOPIC_NAME).value
         self.car_center_point = tuple(self.declare_parameter('car_center_point', CAR_CENTER_POINT).value)
         self.show_window = bool(self.declare_parameter('show_window', SHOW_WINDOW).value)
 
-        # QoS 설정
+        # **새로운 파라미터: 경로 마진**
+        # +값 = 오른쪽으로 이동, -값 = 왼쪽으로 이동
+        self.path_offset = float(self.declare_parameter('path_offset', -80.0).value)
+
+        # QoS
         self.qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.RELIABLE,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -42,16 +45,18 @@ class PathPlannerNode(Node):
 
         # 브릿지/버퍼
         self.bridge = CvBridge()
-        self.last_bev_img = None  # 최신 BEV/ROI 이미지 버퍼
+        self.last_bev_img = None
 
         # 구독/퍼블리시
         self.lane_sub = self.create_subscription(LaneInfo, self.sub_lane_topic, self.lane_callback, self.qos_profile)
-        self.bev_sub  = self.create_subscription(Image, self.sub_bev_topic,  self.bev_image_callback, self.qos_profile)
+        self.bev_sub  = self.create_subscription(Image, self.sub_bev_topic, self.bev_image_callback, self.qos_profile)
         self.publisher = self.create_publisher(PathPlanningResult, self.pub_topic, self.qos_profile)
 
         self.get_logger().info(
-            f"SUB lane: {self.sub_lane_topic}, SUB bev: {self.sub_bev_topic} → PUB: {self.pub_topic} (show_window={self.show_window})"
+            f"SUB lane: {self.sub_lane_topic}, SUB bev: {self.sub_bev_topic} "
+            f"→ PUB: {self.pub_topic} (show_window={self.show_window}, path_offset={self.path_offset})"
         )
+
 
     # BEV/ROI 이미지 콜백
     def bev_image_callback(self, msg: Image):
@@ -92,15 +97,15 @@ class PathPlannerNode(Node):
         xs, ys = zip(*[(tp.target_x, tp.target_y) for tp in target_points])
 
         # 차량 중심점 추가
-        xs = list(xs); ys = list(ys)
-        xs.append(self.car_center_point[0]); ys.append(self.car_center_point[1])
+        xs = list(xs)
+        ys = list(ys)
+        xs.append(self.car_center_point[0])
+        ys.append(self.car_center_point[1])
 
-        # y 기준 정렬 (영상 좌표계: y 증가 = 아래로)
+        # y 기준 정렬
         ys, xs = zip(*sorted(zip(ys, xs), key=lambda p: p[0]))
 
-        # 스플라인
         if len(ys) < 3:
-            # 안전장치 (이상 케이스)
             y_new = np.array(ys, dtype=float)
             x_new = np.array(xs, dtype=float)
         else:
@@ -108,7 +113,11 @@ class PathPlannerNode(Node):
             y_new = np.linspace(min(ys), max(ys), 100)
             x_new = cs(y_new)
 
-        self.get_logger().info(f"Planning path with {len(ys)} pts → {len(y_new)} samples")
+        # **여기서 offset 적용**
+        x_new = x_new + self.path_offset
+        xs = np.array(xs) + self.path_offset
+
+        self.get_logger().info(f"Planning path with {len(ys)} pts → {len(y_new)} samples (offset={self.path_offset})")
         return np.array(xs), np.array(ys), np.array(x_new), np.array(y_new)
 
     def draw_and_show(self, x_pts, y_pts, x_new, y_new):
